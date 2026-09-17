@@ -5,6 +5,175 @@ use std::path::{Path, PathBuf};
 
 const SLANG_SOURCE_VERSION: &str = "2026.17.1";
 
+#[cfg(feature = "static")]
+const SLANG_SOURCE_URL: &str =
+	"https://github.com/shader-slang/slang/archive/refs/tags/v2026.17.1.tar.gz";
+
+const SLANG_EXTERNAL_DEPENDENCIES: [(&str, &str); 8] = [
+	("cmark", "CMakeLists.txt"),
+	("fast_float", "include/fast_float/fast_float.h"),
+	("lua", "onelua.c"),
+	("lz4", "build/cmake/CMakeLists.txt"),
+	("miniz", "CMakeLists.txt"),
+	(
+		"spirv-headers",
+		"include/spirv/unified1/spirv.core.grammar.json",
+	),
+	("unordered_dense", "include/ankerl/unordered_dense.h"),
+	("vulkan", "CMakeLists.txt"),
+];
+
+#[cfg(feature = "static")]
+struct Archive(PathBuf);
+#[cfg(feature = "static")]
+impl Archive {
+	fn extract(&self, destination: &Path) {
+		let file_name = destination
+			.file_name()
+			.expect("Destination has no file name.")
+			.to_string_lossy();
+		let staging_dir = destination.with_file_name(format!("{file_name}.extracting"));
+
+		let _ = std::fs::remove_dir_all(&staging_dir);
+		std::fs::create_dir_all(&staging_dir)
+			.unwrap_or_else(|err| panic!("Couldn't create {}: {err}", staging_dir.display()));
+
+		let file = std::fs::File::open(&self.0)
+			.unwrap_or_else(|err| panic!("Couldn't open {}: {err}", self.0.display()));
+		let decoder = flate2::read::GzDecoder::new(file);
+		let mut archive = tar::Archive::new(decoder);
+		archive
+			.unpack(&staging_dir)
+			.unwrap_or_else(|err| panic!("Couldn't extract {}: {err}", self.0.display()));
+
+		let mut entries = std::fs::read_dir(&staging_dir)
+			.unwrap_or_else(|err| panic!("Couldn't read {}: {err}", staging_dir.display()));
+
+		let top_level = entries
+			.next()
+			.unwrap_or_else(|| panic!("Archive {} is empty.", self.0.display()))
+			.unwrap_or_else(|err| panic!("Couldn't read {}: {err}", staging_dir.display()))
+			.path();
+
+		if entries.next().is_some() {
+			panic!(
+				"Archive {} contains more than one top-level entry.",
+				self.0.display()
+			);
+		}
+
+		let _ = std::fs::remove_dir_all(destination);
+		std::fs::rename(&top_level, destination).unwrap_or_else(|err| {
+			panic!(
+				"Couldn't move {} to {}: {err}",
+				top_level.display(),
+				destination.display()
+			)
+		});
+		let _ = std::fs::remove_dir_all(&staging_dir);
+	}
+}
+
+#[cfg(feature = "static")]
+struct DependencyArchive {
+	name: &'static str,
+	url: &'static str,
+	version: &'static str,
+}
+#[cfg(feature = "static")]
+impl DependencyArchive {
+	fn tarball_url(&self) -> String {
+		format!(
+			"https://github.com/{}/archive/{}.tar.gz",
+			self.url, self.version
+		)
+	}
+
+	fn download(&self, archives_dir: &Path) -> Archive {
+		let archive_path = archives_dir.join(format!("{}.tar.gz", self.name));
+
+		if archive_path
+			.metadata()
+			.is_ok_and(|metadata| metadata.len() > 0)
+		{
+			return Archive(archive_path);
+		}
+
+		let tarball_url = self.tarball_url();
+
+		println!("cargo:warning=Downloading {tarball_url}");
+
+		let status = std::process::Command::new("curl")
+			.args(["-L", "-f", "-sS", "--retry", "3", "-o"])
+			.arg(&archive_path)
+			.arg(&tarball_url)
+			.status()
+			.unwrap_or_else(|err| {
+				let _ = std::fs::remove_file(&archive_path);
+
+				if err.kind() == std::io::ErrorKind::NotFound {
+					panic!(
+						"`curl` is required to download the Slang source. Install curl, initialize the \
+					slang-src submodule, or point SLANG_SOURCE_DIR at a checkout."
+					);
+				}
+
+				panic!("Couldn't run curl: {err}");
+			});
+
+		if !status.success() {
+			let _ = std::fs::remove_file(&archive_path);
+			panic!("Downloading {tarball_url} failed: {status}.");
+		}
+
+		Archive(archive_path)
+	}
+}
+
+#[cfg(feature = "static")]
+const SLANG_DEPENDENCY_ARCHIVES: [DependencyArchive; 8] = [
+	DependencyArchive {
+		name: "cmark",
+		url: "swiftlang/swift-cmark",
+		version: "924936d0427cb25a61169739a7660230bffa6ea6",
+	},
+	DependencyArchive {
+		name: "fast_float",
+		url: "fastfloat/fast_float",
+		version: "e0b53eaf63c6d00e0725788ef1dbb759aa321d79",
+	},
+	DependencyArchive {
+		name: "lua",
+		url: "lua/lua",
+		version: "3fe7be956f23385aa1950dc31e2f25127ccfc0ea",
+	},
+	DependencyArchive {
+		name: "lz4",
+		url: "lz4/lz4",
+		version: "7f71be01f2c6f6b2c3cddb67eef8c38eab12ffd4",
+	},
+	DependencyArchive {
+		name: "miniz",
+		url: "richgel999/miniz",
+		version: "6ef6c68f4fcbb8287aa8edf9c6670804932f41c6",
+	},
+	DependencyArchive {
+		name: "spirv-headers",
+		url: "KhronosGroup/SPIRV-Headers",
+		version: "496543121ce6419f23d6fa5d7194ba66c36212d2",
+	},
+	DependencyArchive {
+		name: "unordered_dense",
+		url: "martinus/unordered_dense",
+		version: "73f3cbb237e84d483afafc743f1f14ec53e12314",
+	},
+	DependencyArchive {
+		name: "vulkan",
+		url: "KhronosGroup/Vulkan-Headers",
+		version: "387259ecf4b0fe0cfac161b1d0b0a74e42796710",
+	},
+];
+
 const SLANG_STATIC_LIBRARIES: [&[&str]; 6] = [
 	&[
 		"libslang-compiler.a",
@@ -19,6 +188,34 @@ const SLANG_STATIC_LIBRARIES: [&[&str]; 6] = [
 	&["liblz4.a", "liblz4_static.a", "lz4.lib", "lz4_static.lib"],
 ];
 
+fn static_build_include_dir() -> (PathBuf, Vec<PathBuf>) {
+	let mut extra_include_dirs = Vec::new();
+	let source_dir = slang_source_dir();
+	let build_dir = compile_slang(&source_dir);
+
+	link_slang_static(&build_dir);
+
+	if let Some(dir) = find_file(&build_dir, "slang-tag-version.h")
+		.and_then(|path| path.parent().map(Path::to_path_buf))
+	{
+		extra_include_dirs.push(dir);
+	}
+
+	(source_dir.join("include"), extra_include_dirs)
+}
+
+fn dylib_build_include_dir() -> (PathBuf, Vec<PathBuf>) {
+	let (include_dir, lib_dir) = slang_installation();
+
+	if !lib_dir.as_os_str().is_empty() {
+		println!("cargo:rustc-link-search=native={}", lib_dir.display());
+	}
+
+	println!("cargo:rustc-link-lib=dylib=slang");
+
+	(include_dir, Vec::new())
+}
+
 fn main() {
 	println!("cargo:rerun-if-env-changed=SLANG_DIR");
 	println!("cargo:rerun-if-env-changed=SLANG_INCLUDE_DIR");
@@ -28,32 +225,11 @@ fn main() {
 	println!("cargo:rerun-if-env-changed=SLANG_ENABLE_DXIL");
 
 	let static_build = env::var("CARGO_FEATURE_STATIC").is_ok();
-	let mut extra_include_dirs = Vec::new();
 
-	let include_dir = if static_build {
-		let source_dir = slang_source_dir();
-
-		let build_dir = compile_slang(&source_dir);
-
-		link_slang_static(&build_dir);
-
-		if let Some(dir) = find_file(&build_dir, "slang-tag-version.h")
-			.and_then(|path| path.parent().map(Path::to_path_buf))
-		{
-			extra_include_dirs.push(dir);
-		}
-
-		source_dir.join("include")
+	let (include_dir, extra_include_dirs) = if static_build {
+		static_build_include_dir()
 	} else {
-		let (include_dir, lib_dir) = slang_installation();
-
-		if !lib_dir.as_os_str().is_empty() {
-			println!("cargo:rustc-link-search=native={}", lib_dir.display());
-		}
-
-		println!("cargo:rustc-link-lib=dylib=slang");
-
-		include_dir
+		dylib_build_include_dir()
 	};
 
 	let out_dir = env::var("OUT_DIR").expect("Couldn't determine output directory.");
@@ -148,14 +324,133 @@ fn slang_source_dir() -> PathBuf {
 		}
 	}
 
-	panic!("Couldn't find the Slang {SLANG_SOURCE_VERSION} source tree.");
+	if cfg!(feature = "static") {
+		return download_slang_source();
+	} else {
+		panic!(
+			"Couldn't find the Slang {SLANG_SOURCE_VERSION} source tree at slang-sys/slang-src."
+		);
+	}
+}
+
+fn missing_external_dependencies(source_dir: &Path) -> Vec<&'static str> {
+	SLANG_EXTERNAL_DEPENDENCIES
+		.iter()
+		.filter(|(name, marker)| {
+			!source_dir
+				.join("external")
+				.join(name)
+				.join(marker)
+				.is_file()
+		})
+		.map(|(name, _)| *name)
+		.collect()
+}
+
+#[cfg(feature = "static")]
+fn is_complete_source(source_dir: &Path) -> bool {
+	source_dir.join("include/slang.h").is_file()
+		&& missing_external_dependencies(source_dir).is_empty()
+}
+
+fn check_slang_source(source_dir: &Path) {
+	let missing = missing_external_dependencies(source_dir);
+
+	if missing.is_empty() {
+		return;
+	}
+
+	let init_args = missing
+		.iter()
+		.map(|name| format!("external/{name}"))
+		.collect::<Vec<_>>()
+		.join(" ");
+
+	panic!(
+		"The Slang source tree at {} is missing its external dependencies {missing:?}. Initialize them:\n\
+		\n\tgit -C {} submodule update --init --depth 1 {init_args}",
+		source_dir.display(),
+		source_dir.display(),
+	);
+}
+
+#[cfg(feature = "static")]
+fn download_slang_source() -> PathBuf {
+	let cache_dir = slang_cache_dir();
+	let source_dir = cache_dir.join("src");
+
+	if !is_complete_source(&source_dir) {
+		let _ = std::fs::remove_dir_all(&source_dir);
+
+		let archives_dir = cache_dir.join("archives");
+		std::fs::create_dir_all(&archives_dir)
+			.unwrap_or_else(|err| panic!("Couldn't create {}: {err}", archives_dir.display()));
+
+		println!(
+			"cargo:warning=Downloading Slang {SLANG_SOURCE_VERSION} sources into {}",
+			cache_dir.display()
+		);
+
+		DependencyArchive {
+			name: "slang",
+			url: SLANG_SOURCE_URL,
+			version: SLANG_SOURCE_VERSION,
+		}
+		.download(&archives_dir)
+		.extract(&source_dir);
+
+		for dependency in SLANG_DEPENDENCY_ARCHIVES {
+			dependency
+				.download(&archives_dir)
+				.extract(&source_dir.join("external").join(dependency.name));
+		}
+	}
+
+	check_slang_source(&source_dir);
+
+	source_dir
+}
+
+#[cfg(feature = "static")]
+fn slang_cache_dir() -> PathBuf {
+	let cargo_home = env::var_os("CARGO_HOME")
+		.map(PathBuf::from)
+		.or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+		.or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".cargo")));
+
+	match cargo_home {
+		Some(cargo_home) => cargo_home.join("shader-slang").join(SLANG_SOURCE_VERSION),
+		None => PathBuf::from(env::var("OUT_DIR").expect("Couldn't determine output directory."))
+			.join("slang-download"),
+	}
 }
 
 fn compile_slang(source_dir: &Path) -> PathBuf {
 	let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Couldn't determine output directory."));
 	let destination = out_dir.join(format!("slang-{SLANG_SOURCE_VERSION}"));
 
-	cmake::Config::new(source_dir)
+	let source_dir = source_dir
+		.canonicalize()
+		.unwrap_or_else(|_| source_dir.to_path_buf());
+
+	// Switching between the submodule and a downloaded copy has to start from a fresh
+	// build tree too, stale object files would be mixed into the archives.
+	let build_dir = destination.join("build");
+	let cache = std::fs::read_to_string(build_dir.join("CMakeCache.txt"));
+
+	if let Ok(cache) = cache {
+		if !cache.contains(&format!(
+			"CMAKE_HOME_DIRECTORY:INTERNAL={}",
+			source_dir.display()
+		)) {
+			let _ = std::fs::remove_dir_all(&build_dir);
+		}
+	}
+
+	cmake::Config::new(&source_dir)
+		// Build the compiler library as a single static archive. Everything else is
+		// disabled so that no tools, tests, examples, submodules beyond the
+		// dependencies checked above, or downloads are needed.
 		.define("SLANG_LIB_TYPE", "STATIC")
 		.define("SLANG_ENABLE_SLANG_GLSLANG", "OFF")
 		.define("SLANG_ENABLE_TESTS", "OFF")

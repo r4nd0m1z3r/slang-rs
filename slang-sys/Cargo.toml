@@ -6,12 +6,15 @@ description = "FFI bindings for the Slang shader language compiler"
 repository = "https://github.com/FloatyMonkey/slang-rs"
 license = "MIT OR Apache-2.0"
 categories = ["compilers", "external-ffi-bindings"]
+exclude = ["/slang-src"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
 
 [build-dependencies]
 bindgen = "0.72.0"
+cmake = "0.1"
 
 [features]
 serde = ["dep:serde"]
+static = []
